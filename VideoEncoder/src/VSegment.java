@@ -1,6 +1,9 @@
+import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -21,23 +24,45 @@ public class VSegment{
         ArrayList<TreeMap<Byte,Byte>> data = new ArrayList<>();
         TreeMap<Byte,Byte> sigPixels;
         vSegInNumPixels = vSegIn[0].width * vSegIn[0].height;
-        FileOutputStream fos = new FileOutputStream(fileName);
+        FileOutputStream fos = new FileOutputStream(".dpcomp.temp");
         BufferedOutputStream bos = new BufferedOutputStream(fos);
         bos.write(ByteBuffer.allocate(1).put((byte)numFrames).array());
         bos.write(ByteBuffer.allocate(4).putInt(vSegIn[0].width).array());
         bos.write(ByteBuffer.allocate(4).putInt(vSegIn[0].height).array());
         for(Integer i = 0;i < vSegInNumPixels;i++) {
             sigPixels = runDPAlgorithm((byte) 0, (byte) (vSegIn.length - 1), i, epsilon);
-            data.add(sigPixels);
-            bos.write(ByteBuffer.allocate(4).putInt(i).array());
-            bos.write(2 * sigPixels.size());
-            for(byte j : sigPixels.keySet()) {
-                bos.write(j);
-                bos.write(sigPixels.get(j));
-            }
+			if(sigPixels.size() != 2) {
+				data.add(sigPixels);
+				bos.write(ByteBuffer.allocate(4).putInt(i).array());
+				bos.write(2 * (sigPixels.size() - 2));
+				for(byte j : sigPixels.keySet()) {
+					if(j != 0 && j != numFrames - 1) {
+						bos.write(j);
+						bos.write(sigPixels.get(j));
+					}
+				}
+			}
         }
         bos.flush();
         bos.close();
+        FileChannel src1 = new FileInputStream(image1).getChannel();
+        FileChannel src2 = new FileInputStream(image2).getChannel();
+        FileChannel cmp1 = new FileInputStream(".dpcomp.temp").getChannel();
+        FileChannel dest = new FileOutputStream(fileName).getChannel();
+        dest.position(4);
+        long size1 = src1.transferTo(0, src1.size(),dest);
+        dest.position(size1 + 8);
+        long size2 = src2.transferTo(0, src2.size(),dest);
+        dest.position(size1 + size2 + 12);
+        long size3 = cmp1.transferTo(0, cmp1.size(),dest);
+        dest.write(ByteBuffer.wrap(ByteBuffer.allocate(4).putInt((int) src1.size()).array()),0);
+        dest.write(ByteBuffer.wrap(ByteBuffer.allocate(4).putInt((int) size2).array()),size1 + 4);
+        dest.write(ByteBuffer.wrap(ByteBuffer.allocate(4).putInt((int) size3).array()),size1 + size2 + 8);
+        src1.close();
+        src2.close();
+        cmp1.close();
+        dest.close();
+        Files.deleteIfExists(Paths.get(".dpcomp.temp"));
         return data;
     }
 
@@ -49,7 +74,7 @@ public class VSegment{
     }
 
     BufferedImage [] decompressSegment(String fname) {
-        int index = 0;
+        int index = 0, ind = 0;
         Byte keyStart;
         Byte keyEnd;
         byte num;
@@ -63,21 +88,42 @@ public class VSegment{
         } catch (IOException e) {
             e.printStackTrace();
         }
+        int size1 = b.getInt();
+        byte [] imageByte1 = new byte[size1];
+        b.get(imageByte1, 0, size1);
+        int size2 = b.getInt();
+        byte [] imageByte2 = new byte[size2];
+        b.get(imageByte2, 0, size2);
+        byte [] imgSpatialData1 = null, imgSpatialData2 = null;
+        try {
+            imgSpatialData1 = ((DataBufferByte)ImageIO.read(new ByteArrayInputStream(imageByte1)).getRaster().getDataBuffer()).getData();
+            imgSpatialData2  = ((DataBufferByte)ImageIO.read(new ByteArrayInputStream(imageByte2)).getRaster().getDataBuffer()).getData();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        int encodedFileSize = b.getInt();
         numFrames = b.get();
         width = b.getInt();
         height = b.getInt();
-        while(index < width * height) {
+        encodedFileSize = encodedFileSize - 9;
+        for(int i = 0;i < width * height;i++) {
+            temp.put((byte) 0,imgSpatialData1[i]);
+            temp.put((byte) (numFrames - 1), imgSpatialData2[i]);
+            arr.add(new TreeMap<>(temp));
+            temp.clear();
+        }
+        while(ind < encodedFileSize) {
             index = b.getInt();
             num = b.get();
             for(int i = 0;i < num ;i+=2) {
                 byte key = b.get();
                 byte val = b.get();
-                temp.put(key,val);
+                arr.get(index).put(key, val);
             }
-            arr.add(new TreeMap<>(temp));
-            temp.clear();
-            index++;
+            //temp.clear();
+            ind += (5 + num);
         }
+        //System.out.println(arr);
         int numPixels = width * height;
         BufferedImage [] img = null;
         vSegOut = new VFrame[numFrames];
@@ -124,8 +170,14 @@ public class VSegment{
         return sigPixels;
     }
 
+    void setRefImageFileNames(String img1, String img2) {
+        image1 = img1;
+        image2 = img2;
+    }
+
     private VFrame [] vSegIn;
     private int vSegInNumPixels;
+    private String image1, image2;
     private int numFrames;
     private VFrame [] vSegOut;
 }
